@@ -8,8 +8,9 @@ use burn_cubecl::cubecl::cube;
 use burn_cubecl::cubecl::prelude::*;
 
 use super::types::{PixelRect, ProjectUniforms, Quat, Splat, Sym2, TileBbox, Vec3A};
-use crate::kernels::camera_model::{CameraModel, calculate_project_jacobian};
+use crate::kernels::camera_model::{CameraModel, calculate_project_jacobian, project};
 pub use brush_cube::{calc_sigma, is_finite_f32, sigmoid};
+use brush_cube::{UT_SIGMA_SCALE, UT_WEIGHT_COV_CENTER, UT_WEIGHT_MEAN_CENTER, UT_WEIGHT_OUTER};
 
 pub const TILE_WIDTH: u32 = 16;
 pub const TILE_SIZE: u32 = TILE_WIDTH * TILE_WIDTH;
@@ -168,6 +169,89 @@ pub fn calc_cov2d(
     let scale_down = select(max_abs > lim, lim / max_abs, 1.0f32);
 
     raw.scale(scale_down)
+}
+
+/// 3DGUT projection: mean2d + cov2d via the scaled Unscented Transform
+/// instead of a single-Jacobian linearization. Camera-model-agnostic —
+/// pushes 7 sigma points through the exact (possibly nonlinear)
+/// `project` for `camera_model` and reconstructs the 2D mean/covariance
+/// from the weighted set of projected points. More accurate than
+/// `calc_cov2d` for large Gaussians / high projection curvature (e.g.
+/// near the edge of a wide-FOV fisheye), at the cost of 7x the
+/// per-splat `project` evaluations. See `calculate_ut_vjp` in
+/// `brush-render-bwd` for the matching backward pass.
+#[cube]
+pub fn calc_mean_cov2d_ut(
+    scale: Vec3A,
+    quat: Quat,
+    mean_c: Vec3A,
+    u: ProjectUniforms,
+    #[comptime] camera_model: CameraModel,
+) -> (f32, f32, Sym2) {
+    // `ns` is already a valid "square root" of the 3D covariance
+    // (Sigma_3d = ns * ns^T), so its columns are directly usable as the
+    // sigma-point offset basis — no Cholesky/eigendecomposition needed.
+    let ns = u.view_rotation().mul_mat3(quat.to_mat3()).mul_diag(scale);
+    let c0 = ns.col0().scale(UT_SIGMA_SCALE);
+    let c1 = ns.col1().scale(UT_SIGMA_SCALE);
+    let c2 = ns.col2().scale(UT_SIGMA_SCALE);
+
+    let p0 = mean_c;
+    let p1 = mean_c.add(c0);
+    let p2 = mean_c.add(c1);
+    let p3 = mean_c.add(c2);
+    let p4 = mean_c.sub(c0);
+    let p5 = mean_c.sub(c1);
+    let p6 = mean_c.sub(c2);
+
+    let (u0x, u0y) = project(p0, u.pinhole_params, camera_model);
+    let (u1x, u1y) = project(p1, u.pinhole_params, camera_model);
+    let (u2x, u2y) = project(p2, u.pinhole_params, camera_model);
+    let (u3x, u3y) = project(p3, u.pinhole_params, camera_model);
+    let (u4x, u4y) = project(p4, u.pinhole_params, camera_model);
+    let (u5x, u5y) = project(p5, u.pinhole_params, camera_model);
+    let (u6x, u6y) = project(p6, u.pinhole_params, camera_model);
+
+    let mean2d_x =
+        UT_WEIGHT_MEAN_CENTER * u0x + UT_WEIGHT_OUTER * (u1x + u2x + u3x + u4x + u5x + u6x);
+    let mean2d_y =
+        UT_WEIGHT_MEAN_CENTER * u0y + UT_WEIGHT_OUTER * (u1y + u2y + u3y + u4y + u5y + u6y);
+
+    let d0x = u0x - mean2d_x;
+    let d0y = u0y - mean2d_y;
+    let d1x = u1x - mean2d_x;
+    let d1y = u1y - mean2d_y;
+    let d2x = u2x - mean2d_x;
+    let d2y = u2y - mean2d_y;
+    let d3x = u3x - mean2d_x;
+    let d3y = u3y - mean2d_y;
+    let d4x = u4x - mean2d_x;
+    let d4y = u4y - mean2d_y;
+    let d5x = u5x - mean2d_x;
+    let d5y = u5y - mean2d_y;
+    let d6x = u6x - mean2d_x;
+    let d6y = u6y - mean2d_y;
+
+    let outer_xx = d1x * d1x + d2x * d2x + d3x * d3x + d4x * d4x + d5x * d5x + d6x * d6x;
+    let outer_xy = d1x * d1y + d2x * d2y + d3x * d3y + d4x * d4y + d5x * d5y + d6x * d6y;
+    let outer_yy = d1y * d1y + d2y * d2y + d3y * d3y + d4y * d4y + d5y * d5y + d6y * d6y;
+
+    let cov00 = UT_WEIGHT_COV_CENTER * d0x * d0x + UT_WEIGHT_OUTER * outer_xx;
+    let cov01 = UT_WEIGHT_COV_CENTER * d0x * d0y + UT_WEIGHT_OUTER * outer_xy;
+    let cov11 = UT_WEIGHT_COV_CENTER * d0y * d0y + UT_WEIGHT_OUTER * outer_yy;
+
+    // Same overflow clamp as `calc_cov2d` — huge-but-finite log_scale
+    // during early training shouldn't blow up the conic's det.
+    let raw = Sym2 {
+        c00: cov00,
+        c01: cov01,
+        c11: cov11,
+    };
+    let lim = 1.0e18f32;
+    let max_abs = raw.max_abs();
+    let scale_down = select(max_abs > lim, lim / max_abs, 1.0f32);
+
+    (mean2d_x, mean2d_y, raw.scale(scale_down))
 }
 
 /// MIP-aware blur compensation. Adds `cov_blur` to the diagonal of the

@@ -14,11 +14,20 @@ use crate::{
     sh::{sh_coeffs_for_degree, sh_degree_from_coeffs},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum SplatRenderMode {
+    #[default]
     Default,
     Mip,
+    /// 3D Gaussian Unscented Transform: projects each splat via sigma
+    /// points pushed through the exact (possibly nonlinear) camera model
+    /// instead of a single-Jacobian linearization. More accurate for
+    /// wide-FOV/fisheye cameras where the affine approximation breaks
+    /// down near the edge of the frame.
+    Ut,
 }
 
 /// Forward/backward rasterizer mode. Replaces the old `bwd_info: bool` so the
@@ -64,7 +73,7 @@ pub struct Splats {
     pub sh_coeffs: Param<Tensor<3>>,
     pub raw_opacities: Param<Tensor<1>>,
     #[module(skip)]
-    pub render_mip: bool,
+    pub render_mode: SplatRenderMode,
     /// Optional per-splat world-space scale floor (Mip-Splatting's 3D filter).
     /// Frozen, camera-derived, never optimized and never exported — a pure
     /// training-time pressure. When set, the render path inflates each splat's
@@ -180,7 +189,7 @@ impl Splats {
             transforms: Param::initialized(ParamId::new(), transforms.detach().require_grad()),
             sh_coeffs: Param::initialized(ParamId::new(), sh_coeffs.detach().require_grad()),
             raw_opacities: Param::initialized(ParamId::new(), raw_opacity.detach().require_grad()),
-            render_mip: mode == SplatRenderMode::Mip,
+            render_mode: mode,
             min_scale: None,
         }
     }
@@ -392,11 +401,7 @@ pub async fn render_splats(
         transforms
     };
 
-    let render_mode = if splats.render_mip {
-        SplatRenderMode::Mip
-    } else {
-        SplatRenderMode::Default
-    };
+    let render_mode = splats.render_mode;
 
     let use_float = matches!(texture_mode, TextureMode::Float);
 

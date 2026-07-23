@@ -188,6 +188,7 @@ async fn read_transforms_file(
             vfs.clone(),
             path,
             mask_path,
+            false,
             load_args.max_resolution,
             load_args.alpha_mode,
         );

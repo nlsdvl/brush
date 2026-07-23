@@ -6,10 +6,11 @@
 //! internally.
 
 use super::helpers::{
-    calc_cov2d, compensate_cov2d, compute_bbox_extent, count_contributing_tiles, get_tile_bbox,
-    is_finite_f32, read_mean_viewspace, read_quat_unorm, read_scale, sigmoid,
+    calc_cov2d, calc_mean_cov2d_ut, compensate_cov2d, compute_bbox_extent,
+    count_contributing_tiles, get_tile_bbox, is_finite_f32, read_mean_viewspace, read_quat_unorm,
+    read_scale, sigmoid,
 };
-use super::types::ProjectUniforms;
+use super::types::{ProjectUniforms, Sym2};
 use crate::kernels::camera_model::{CameraModel, project};
 use burn_cubecl::cubecl;
 use burn_cubecl::cubecl::cube;
@@ -30,6 +31,7 @@ pub fn project_forward_kernel(
     max_radius: &mut Tensor<f32>,
     u: ProjectUniforms,
     #[comptime] mip_splatting: bool,
+    #[comptime] use_ut: bool,
     #[comptime] camera_model: CameraModel,
 ) {
     let global_gid = ABSOLUTE_POS as u32;
@@ -79,15 +81,29 @@ pub fn project_forward_kernel(
 
     let quat = quat_unorm.normalize();
 
-    let raw_cov = calc_cov2d(scale, quat, mean_c, u, camera_model);
+    // CubeCL's mutable-reassignment-across-comptime-branches only
+    // supports primitive scalars, not composite structs — so the two
+    // paths are expressed as a value-producing `if`/`else` over plain
+    // f32s, and `Sym2` is only constructed once, unconditionally.
+    let (mean2d_x, mean2d_y, cov_c00, cov_c01, cov_c11) = if comptime![use_ut] {
+        let (mx, my, cov) = calc_mean_cov2d_ut(scale, quat, mean_c, u, camera_model);
+        (mx, my, cov.c00, cov.c01, cov.c11)
+    } else {
+        let cov = calc_cov2d(scale, quat, mean_c, u, camera_model);
+        let (mx, my) = project(mean_c, u.pinhole_params, camera_model);
+        (mx, my, cov.c00, cov.c01, cov.c11)
+    };
+    let raw_cov = Sym2 {
+        c00: cov_c00,
+        c01: cov_c01,
+        c11: cov_c11,
+    };
     let (cov, filter_comp) = compensate_cov2d(raw_cov, mip_splatting);
     let opac = sigmoid(raw_opac) * filter_comp;
 
     if !cov.is_finite() {
         terminate!();
     }
-
-    let (mean2d_x, mean2d_y) = project(mean_c, u.pinhole_params, camera_model);
 
     if !(opac >= 1.0f32 / 255.0f32) {
         terminate!();

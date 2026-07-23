@@ -132,6 +132,7 @@ async fn read_dataset_inner(
             vfs.clone(),
             image_path,
             mask_path,
+            false,
             load_args.max_resolution,
             load_args.alpha_mode,
         );

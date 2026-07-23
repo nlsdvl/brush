@@ -192,6 +192,12 @@ async fn load_dataset_inner(
             };
 
             let mask_path = find_mask_path(&vfs, path);
+            let is_fisheye = matches!(
+                camera_model,
+                KannalaBrandt4(_) | ThinPrismFisheye(_)
+            );
+            let synthetic_vignette_mask =
+                is_fisheye && mask_path.is_none() && load_args.fisheye_vignette_mask;
 
             // Convert w2c to c2w.
             let world_to_cam =
@@ -213,6 +219,7 @@ async fn load_dataset_inner(
                 vfs.clone(),
                 path.to_path_buf(),
                 mask_path.map(|p| p.to_path_buf()),
+                synthetic_vignette_mask,
                 load_args.max_resolution,
                 load_args.alpha_mode,
             );

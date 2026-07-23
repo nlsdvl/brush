@@ -11,3 +11,4 @@
 
 pub mod project_backwards;
 pub mod rasterize_backwards;
+pub mod ut_vjp;

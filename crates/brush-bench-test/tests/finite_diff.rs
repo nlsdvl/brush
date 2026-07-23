@@ -791,6 +791,154 @@ async fn fuzz_finite_diff_camera_models() {
     assert_fuzz_clean(&results, 0.02, 2e-4, "cam-models");
 }
 
+// ---- 3DGUT (Unscented Transform) ----
+//
+// `SplatRenderMode::Ut` replaces the single-Jacobian EWA linearization
+// with sigma points pushed through the exact camera projection. Its
+// backward is a from-scratch analytic VJP (`calculate_ut_vjp`), so it
+// gets the same finite-diff treatment as the affine path above, across
+// all four camera models, plus a sanity check that it agrees with the
+// affine path in the small-Gaussian limit (where both should describe
+// the same near-linear pushforward).
+
+fn build_splats_mode(scene: &Scene, device: &burn::tensor::Device, mode: SplatRenderMode) -> Splats {
+    Splats::from_raw(
+        scene.means.clone(),
+        scene.rots.clone(),
+        scene.log_scales.clone(),
+        scene.sh_dc.clone(),
+        scene.raw_opac.clone(),
+        mode,
+        device,
+    )
+}
+
+async fn render_value_mode(
+    scene: &Scene,
+    cam: &Camera,
+    img_size: glam::UVec2,
+    device: &burn::tensor::Device,
+    mode: SplatRenderMode,
+) -> f32 {
+    let splats = build_splats_mode(scene, device, mode);
+    let diff = render_splats_with_pass(splats, cam, img_size, Vec3::ZERO, PASS).await;
+    diff.img
+        .mean()
+        .into_scalar_async::<f32>()
+        .await
+        .expect("loss readback")
+}
+
+async fn analytical_grads_mode(
+    scene: &Scene,
+    cam: &Camera,
+    img_size: glam::UVec2,
+    device: &burn::tensor::Device,
+    mode: SplatRenderMode,
+) -> (Splats, Gradients) {
+    let splats = build_splats_mode(scene, device, mode);
+    let diff = render_splats_with_pass(splats.clone(), cam, img_size, Vec3::ZERO, PASS).await;
+    let grads = diff.img.mean().backward();
+    (splats, grads)
+}
+
+/// Same shape as `run_obscure_fuzz_with`, but always renders in
+/// `SplatRenderMode::Ut` (that harness hardcodes `Default` via
+/// `build_splats`, so it can't cover the UT path without risking
+/// regressions in the many tests that already depend on it).
+async fn run_ut_fuzz<S, C>(
+    device: &burn::tensor::Device,
+    img_size: glam::UVec2,
+    n_iter: u64,
+    scene_fn: S,
+    cam_fn: C,
+) -> Vec<FuzzRow>
+where
+    S: Fn(u64) -> (Scene, usize, String),
+    C: Fn(u64) -> Camera,
+{
+    let mut results: Vec<FuzzRow> = Vec::with_capacity(n_iter as usize);
+
+    for seed in 0..n_iter {
+        let (scene, n, tag) = scene_fn(seed);
+        let cam = cam_fn(seed);
+        let (splats, grads) =
+            analytical_grads_mode(&scene, &cam, img_size, device, SplatRenderMode::Ut).await;
+
+        let mut rng = Sm64::new(seed.wrapping_mul(0xA5A5_5A5A).wrapping_add(0x1234));
+        let (lane, splat, comp) = random_param(&mut rng, n);
+        let an = analytical_at(&splats, &grads, lane, splat, comp).await;
+
+        let mut s_plus = scene.clone();
+        perturb(&mut s_plus, lane, splat, comp, FUZZ_EPS);
+        let l_plus =
+            render_value_mode(&s_plus, &cam, img_size, device, SplatRenderMode::Ut).await;
+        let mut s_minus = scene.clone();
+        perturb(&mut s_minus, lane, splat, comp, -FUZZ_EPS);
+        let l_minus =
+            render_value_mode(&s_minus, &cam, img_size, device, SplatRenderMode::Ut).await;
+        let numerical = (l_plus - l_minus) / (2.0 * FUZZ_EPS);
+        let scale = numerical.abs().max(an.abs()).max(1e-8);
+        let rel = (numerical - an).abs() / scale;
+        results.push((
+            rel,
+            seed,
+            splat,
+            comp,
+            lane,
+            numerical,
+            an,
+            FUZZ_EPS,
+            tag.clone(),
+        ));
+    }
+    results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    results
+}
+
+/// Fuzz the UT backward against finite-diff, across all four camera
+/// models — the UT counterpart of `fuzz_finite_diff_camera_models`.
+#[tokio::test]
+async fn fuzz_finite_diff_ut_camera_models() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let scene_fn = |seed: u64| {
+        let mut rng = Sm64::new(seed.wrapping_add(0xC0DE_BEEF));
+        let n = rng.usize_in(3, 9);
+        let (_, model_name) = random_camera_with_model(seed);
+        (random_scene(seed, n), n, model_name.into())
+    };
+    let cam_fn = |seed: u64| random_camera_with_model(seed).0;
+    let results = run_ut_fuzz(&device, glam::uvec2(32, 32), 20, scene_fn, cam_fn).await;
+    assert_fuzz_clean(&results, 0.03, 3e-4, "ut-cam-models");
+}
+
+/// UT should converge to the existing affine-Jacobian result in the
+/// small-Gaussian limit — both describe the same near-linear pushforward
+/// when the splat's footprint is tiny relative to the projection's local
+/// curvature.
+#[tokio::test]
+async fn ut_matches_affine_for_small_splats() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let img_size = glam::uvec2(32, 32);
+    let cam = std_cam();
+
+    let mut scene = base_scene();
+    for s in &mut scene.log_scales {
+        *s -= 6.0; // shrink scales by ~e^6 ≈ 400x
+    }
+
+    let default_val =
+        render_value_mode(&scene, &cam, img_size, &device, SplatRenderMode::Default).await;
+    let ut_val = render_value_mode(&scene, &cam, img_size, &device, SplatRenderMode::Ut).await;
+    let diff = (default_val - ut_val).abs();
+    assert!(
+        diff < 1e-4,
+        "UT should match affine EWA for tiny splats: default={default_val} ut={ut_val} diff={diff}"
+    );
+}
+
 // ---- Obscure fuzz: stress less-covered axes ----
 
 /// Row layout for fuzz-style results.

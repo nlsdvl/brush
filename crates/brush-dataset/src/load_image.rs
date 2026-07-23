@@ -13,6 +13,10 @@ pub struct LoadImage {
     vfs: Arc<BrushVfs>,
     path: PathBuf,
     mask_path: Option<PathBuf>,
+    /// Synthesize a circular vignette mask (see [`apply_synthetic_vignette_mask`])
+    /// when there's no explicit `mask_path`. Set for fisheye-family camera
+    /// models by the format loader; never overrides a real mask.
+    synthetic_vignette_mask: bool,
     max_resolution: u32,
     alpha_mode: AlphaMode,
     scale: f32,
@@ -22,6 +26,7 @@ impl PartialEq for LoadImage {
     fn eq(&self, other: &Self) -> bool {
         self.path == other.path
             && self.mask_path == other.mask_path
+            && self.synthetic_vignette_mask == other.synthetic_vignette_mask
             && self.max_resolution == other.max_resolution
             && self.scale == other.scale
     }
@@ -32,21 +37,22 @@ impl LoadImage {
         vfs: Arc<BrushVfs>,
         path: PathBuf,
         mask_path: Option<PathBuf>,
+        synthetic_vignette_mask: bool,
         max_resolution: u32,
         override_alpha_mode: Option<AlphaMode>,
     ) -> Self {
-        let alpha_mode = override_alpha_mode.unwrap_or_else(|| {
-            if mask_path.is_some() {
-                AlphaMode::Masked
-            } else {
-                AlphaMode::Transparent
-            }
+        let has_mask = mask_path.is_some() || synthetic_vignette_mask;
+        let alpha_mode = override_alpha_mode.unwrap_or(if has_mask {
+            AlphaMode::Masked
+        } else {
+            AlphaMode::Transparent
         });
 
         Self {
             vfs,
             path,
             mask_path,
+            synthetic_vignette_mask,
             max_resolution,
             alpha_mode,
             scale: 1.0,
@@ -96,6 +102,8 @@ impl LoadImage {
             }
 
             img = masked_img.into();
+        } else if self.synthetic_vignette_mask {
+            img = apply_synthetic_vignette_mask(img);
         }
 
         let scale = self.output_scale(img.width(), img.height());
@@ -203,6 +211,35 @@ fn decode_with_cap(
         return Ok(img);
     }
     image::load_from_memory(bytes)
+}
+
+/// Fraction of the inscribed circle's radius kept opaque; trims the soft
+/// vignette edge. A geometric approximation (circle centered on the image,
+/// not derived from the lens' calibrated valid-FOV angle) — simple to
+/// compute and tune, at the cost of not being an exact fit. Revisit if it
+/// doesn't track real fisheye footage closely enough.
+const VIGNETTE_FILL_FRACTION: f32 = 0.98;
+
+/// Zero the alpha channel outside a circle inscribed in the image
+/// (centered on the image, radius `min(w, h) / 2 * VIGNETTE_FILL_FRACTION`).
+/// Approximates a circular fisheye lens' invalid-FOV vignette so training
+/// can mask it out like any other `masks/`-supplied mask, without the user
+/// having to hand-produce one.
+fn apply_synthetic_vignette_mask(img: DynamicImage) -> DynamicImage {
+    let mut img = img.into_rgba8();
+    let (w, h) = img.dimensions();
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let radius = w.min(h) as f32 / 2.0 * VIGNETTE_FILL_FRACTION;
+    let radius_sq = radius * radius;
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let dx = x as f32 + 0.5 - cx;
+        let dy = y as f32 + 0.5 - cy;
+        if dx * dx + dy * dy > radius_sq {
+            pixel[3] = 0;
+        }
+    }
+    img.into()
 }
 
 fn decode_jpeg_scaled(bytes: &[u8], max_resolution: u32) -> Option<DynamicImage> {

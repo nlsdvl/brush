@@ -1,6 +1,6 @@
 use std::vec;
 
-use brush_render::gaussian_splats::Splats;
+use brush_render::gaussian_splats::{Splats, SplatRenderMode};
 use brush_render::sh::sh_coeffs_for_degree;
 use burn::tensor::Transaction;
 use glam::Vec3;
@@ -184,7 +184,11 @@ pub async fn splat_to_ply(splats: Splats, up_axis: Option<Vec3>) -> Result<Vec<u
     let sh_degree = splats.sh_degree();
     let ply = read_splat_data(splats.clone()).await?;
 
-    let render_mode_str = if splats.render_mip { "mip" } else { "default" };
+    let render_mode_str = match splats.render_mode {
+        SplatRenderMode::Mip => "mip",
+        SplatRenderMode::Ut => "ut",
+        SplatRenderMode::Default => "default",
+    };
 
     let mut comments = vec!["Exported from Brush".to_owned()];
     if let Some(up) = up_axis {
@@ -207,7 +211,6 @@ mod tests {
     use crate::import::load_splat_from_ply;
     use crate::test_utils::create_test_splats;
 
-    use brush_render::gaussian_splats::SplatRenderMode;
     use std::io::Cursor;
     use wasm_bindgen_test::wasm_bindgen_test;
 

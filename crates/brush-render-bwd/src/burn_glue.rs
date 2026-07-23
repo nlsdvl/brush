@@ -190,7 +190,7 @@ pub struct SplatOutputDiff {
 /// [`lift_to_autodiff`] so the autodiff `checkpointing` field is set. Use this
 /// instead of `splats.train()` until upstream burn-dispatch fixes `from_inner`.
 pub fn lift_splats_to_autodiff(splats: Splats) -> Splats {
-    let mip = splats.render_mip;
+    let render_mode = splats.render_mode;
     let min_scale = splats.min_scale.clone();
     let (transforms_id, transforms, _) = splats.transforms.consume();
     let (sh_coeffs_id, sh_coeffs, _) = splats.sh_coeffs.consume();
@@ -202,7 +202,7 @@ pub fn lift_splats_to_autodiff(splats: Splats) -> Splats {
             raw_opacity_id,
             lift_to_autodiff(raw_opacity).require_grad(),
         ),
-        render_mip: mip,
+        render_mode,
         // Keep the frozen floor on the inner backend. `#[module(skip)]` fields
         // aren't converted by `.valid()`, so lifting it here would leave an
         // autodiff `f` on an inner module after eval-strip and mix backends in
@@ -278,11 +278,7 @@ pub async fn render_splats_with_pass(
         .compute_bound()
         .stateful();
 
-    let render_mode = if splats.render_mip {
-        SplatRenderMode::Mip
-    } else {
-        SplatRenderMode::Default
-    };
+    let render_mode = splats.render_mode;
 
     let transforms_inner: FloatTensor<MainBackend> = transforms_ad.primitive.clone();
     let sh_inner: FloatTensor<MainBackend> = sh_coeffs_ad.primitive;

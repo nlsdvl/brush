@@ -140,6 +140,7 @@ impl SplatBwdOps for MainBackendBase {
         let v_refine_weight = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
 
         let mip_splat = matches!(render_mode, SplatRenderMode::Mip);
+        let use_ut = matches!(render_mode, SplatRenderMode::Ut);
 
         let num_visible = project_uniforms.num_visible;
 
@@ -161,6 +162,7 @@ impl SplatBwdOps for MainBackendBase {
                 v_refine_weight.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
+                use_ut,
                 project_uniforms.sh_degree,
                 project_uniforms.camera_model,
             );

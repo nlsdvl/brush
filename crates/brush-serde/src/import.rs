@@ -231,6 +231,7 @@ pub fn stream_splat_from_ply<T: AsyncRead + Unpin>(
                     .map(|s| s.trim())
                 {
                     Some("mip") => Some(SplatRenderMode::Mip),
+                    Some("ut") => Some(SplatRenderMode::Ut),
                     Some("default") => Some(SplatRenderMode::Default),
                     _ => None,
                 }

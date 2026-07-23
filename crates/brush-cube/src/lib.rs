@@ -27,6 +27,17 @@ pub use host::*;
 pub type MainBackend = Wgpu;
 pub type MainBackendBase = CubeBackend<WgpuRuntime>;
 
+/// Scaled Unscented Transform parameters for 3D Gaussian projection
+/// (3DGUT), `n = 3` (`mean_c` has 3 dims). `alpha = 1`, `beta = 2` (optimal
+/// for Gaussian-distributed inputs — matches the 4th moment), `kappa = 0`
+/// (so `lambda = alpha^2 * (n + kappa) - n = 0`, i.e. `n + lambda = n`).
+/// Shared between `brush-render` (forward) and `brush-render-bwd`
+/// (backward VJP) so both sides of the sigma-point transform agree.
+pub const UT_SIGMA_SCALE: f32 = 1.732_050_8; // sqrt(n + lambda) = sqrt(3)
+pub const UT_WEIGHT_MEAN_CENTER: f32 = 0.0; // lambda / (n + lambda)
+pub const UT_WEIGHT_COV_CENTER: f32 = 2.0; // lambda/(n+lambda) + (1 - alpha^2 + beta)
+pub const UT_WEIGHT_OUTER: f32 = 1.0 / 6.0; // 1 / (2 * (n + lambda)), mean & cov alike
+
 use burn_cubecl::cubecl;
 use burn_cubecl::cubecl::cube;
 use burn_cubecl::cubecl::prelude::*;

@@ -1,10 +1,11 @@
 //! Backward projection.
 
+use crate::kernels::ut_vjp::calculate_ut_vjp;
 use brush_cube::{Vec2, is_finite_f32, sigmoid};
 use brush_render::kernels::camera_model::CameraModel;
 use brush_render::kernels::camera_model::{calculate_project_jacobian, calculate_projection_vjp};
 use brush_render::kernels::helpers::{
-    calc_cov2d, compensate_cov2d, read_quat_unorm, read_scale, world_to_cam,
+    calc_cov2d, calc_mean_cov2d_ut, compensate_cov2d, read_quat_unorm, read_scale, world_to_cam,
 };
 use brush_render::kernels::sh::{num_sh_coeffs, sh_coeffs_to_color_vjp, sh_color_viewdir_vjp};
 use brush_render::kernels::types::{Mat3, ProjectUniforms, Quat, Sym2, Vec3A};
@@ -110,6 +111,7 @@ pub fn project_backwards_kernel(
     v_refine_weight: &mut Tensor<f32>,
     u: ProjectUniforms,
     #[comptime] mip_splatting: bool,
+    #[comptime] use_ut: bool,
     #[comptime] sh_degree: u32,
     #[comptime] camera_model: CameraModel,
 ) {
@@ -177,7 +179,22 @@ pub fn project_backwards_kernel(
     let r = quat.to_mat3();
     let m = r.mul_diag(scale);
 
-    let raw_cov = calc_cov2d(scale, quat, mean_c, u, camera_model);
+    // Mutable-reassignment-across-comptime-branches only works for
+    // primitive scalars in CubeCL, not composite structs — so this is a
+    // value-producing `if`/`else` over plain f32s, with `Sym2` built
+    // once, unconditionally, afterwards.
+    let (cov_c00, cov_c01, cov_c11) = if comptime![use_ut] {
+        let (_, _, cov) = calc_mean_cov2d_ut(scale, quat, mean_c, u, camera_model);
+        (cov.c00, cov.c01, cov.c11)
+    } else {
+        let cov = calc_cov2d(scale, quat, mean_c, u, camera_model);
+        (cov.c00, cov.c01, cov.c11)
+    };
+    let raw_cov = Sym2 {
+        c00: cov_c00,
+        c01: cov_c01,
+        c11: cov_c11,
+    };
     let (cov, filter_comp) = compensate_cov2d(raw_cov, mip_splatting);
     let opac_sig = sigmoid(raw_opac[global_gid as usize]);
     v_raw_opac[global_gid as usize] = filter_comp * v_alpha_in * opac_sig * (1.0f32 - opac_sig);
@@ -195,37 +212,78 @@ pub fn project_backwards_kernel(
     };
     let v_cov2d = inverse2x2_vjp(conic_inv, v_inv);
 
-    // covar = M * M^T (symmetric).
-    let covar = m.outer_product_self();
-
-    // covar_c = R_cam * covar * R_cam^T (symmetric).
     let view_rot = u.view_rotation();
-    let cov_c = covar.congruence(view_rot);
+    let v_mean2d = Vec2::new(v_mean2d_x, v_mean2d_y);
 
-    let cam_jac = calculate_project_jacobian(
-        mean_c,
-        u.jacobian_clamp_limits,
-        u.pinhole_params,
-        camera_model,
-    );
-    let v_mean_c = calculate_projection_vjp(
-        cam_jac,
-        mean_c,
-        cov_c,
-        u,
-        v_cov2d,
-        Vec2::new(v_mean2d_x, v_mean2d_y),
-        camera_model,
-    );
+    // Same constraint as above: express the two paths as a value-
+    // producing `if`/`else` over plain f32s (3 for `v_mean_c`, 9 for
+    // `v_m`'s columns), then reconstruct `Vec3A`/`Mat3` once afterwards.
+    #[allow(clippy::type_complexity)]
+    let (vmx, vmy, vmz, m0x, m0y, m0z, m1x, m1y, m1z, m2x, m2y, m2z) = if comptime![use_ut] {
+        let (v_mean_c, v_ns) =
+            calculate_ut_vjp(scale, quat, mean_c, u, v_mean2d, v_cov2d, camera_model);
+        // ns = view_rot * m, so (by linearity) v_m = view_rot^T * v_ns,
+        // applied per column.
+        let vm0 = view_rot.transpose_mul_vec3(v_ns.col0());
+        let vm1 = view_rot.transpose_mul_vec3(v_ns.col1());
+        let vm2 = view_rot.transpose_mul_vec3(v_ns.col2());
+        (
+            v_mean_c.x(),
+            v_mean_c.y(),
+            v_mean_c.z(),
+            vm0.x(),
+            vm0.y(),
+            vm0.z(),
+            vm1.x(),
+            vm1.y(),
+            vm1.z(),
+            vm2.x(),
+            vm2.y(),
+            vm2.z(),
+        )
+    } else {
+        // covar = M * M^T (symmetric).
+        let covar = m.outer_product_self();
+        // covar_c = R_cam * covar * R_cam^T (symmetric).
+        let cov_c = covar.congruence(view_rot);
 
-    // v_covar_c = J^T * v_cov2d * J (2x2 sym → 3x3 sym).
-    let vcc = cam_jac.transpose_congruence_sym2(v_cov2d);
+        let cam_jac = calculate_project_jacobian(
+            mean_c,
+            u.jacobian_clamp_limits,
+            u.pinhole_params,
+            camera_model,
+        );
+        let v_mean_c =
+            calculate_projection_vjp(cam_jac, mean_c, cov_c, u, v_cov2d, v_mean2d, camera_model);
+
+        // v_covar_c = J^T * v_cov2d * J (2x2 sym → 3x3 sym).
+        let vcc = cam_jac.transpose_congruence_sym2(v_cov2d);
+        // v_covar = R^T * v_covar_c * R (symmetric).
+        // v_M = (v_covar + v_covar^T) * M = 2 * v_covar * M.
+        let v_m = vcc.transpose_congruence(view_rot).scale(2.0f32).mul_mat3(m);
+        (
+            v_mean_c.x(),
+            v_mean_c.y(),
+            v_mean_c.z(),
+            v_m.c0_x,
+            v_m.c0_y,
+            v_m.c0_z,
+            v_m.c1_x,
+            v_m.c1_y,
+            v_m.c1_z,
+            v_m.c2_x,
+            v_m.c2_y,
+            v_m.c2_z,
+        )
+    };
+    let v_mean_c = Vec3A::new(vmx, vmy, vmz);
+    let v_m = Mat3::from_cols(
+        Vec3A::new(m0x, m0y, m0z),
+        Vec3A::new(m1x, m1y, m1z),
+        Vec3A::new(m2x, m2y, m2z),
+    );
 
     let v_mean = view_rot.transpose_mul_vec3(v_mean_c).add(v_mean_from_sh);
-
-    // v_covar = R^T * v_covar_c * R (symmetric).
-    // v_M = (v_covar + v_covar^T) * M = 2 * v_covar * M.
-    let v_m = vcc.transpose_congruence(view_rot).scale(2.0f32).mul_mat3(m);
 
     // v_scale = (R[i] dot v_M[i]) * exp(log_scale).
     let v_scale_exp = Vec3A::new(

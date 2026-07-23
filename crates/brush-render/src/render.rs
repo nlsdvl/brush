@@ -65,6 +65,7 @@ impl SplatOps for MainBackendBase {
         let total_splats = transforms.shape()[0] as u32;
         let sh_degree = sh_degree_from_coeffs(sh_coeffs.shape()[1] as u32);
         let mip_splat = matches!(render_mode, SplatRenderMode::Mip);
+        let use_ut = matches!(render_mode, SplatRenderMode::Ut);
 
         let half_max_render_fov =
             ((camera.fov_x as f32).hypot(camera.fov_y as f32) * 1.05).min(2.0 * PI - 1e-6) * 0.5;
@@ -130,6 +131,7 @@ impl SplatOps for MainBackendBase {
                 max_radius.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
+                use_ut,
                 camera.camera_model,
             );
             (
@@ -169,6 +171,7 @@ impl SplatOps for MainBackendBase {
         project_uniforms.num_visible = num_visible;
 
         let mip_splat = matches!(render_mode, SplatRenderMode::Mip);
+        let use_ut = matches!(render_mode, SplatRenderMode::Ut);
         let img_size: glam::UVec2 = project_uniforms.img_size.into();
         let tile_bounds: glam::UVec2 = project_uniforms.tile_bounds.into();
         let num_visible_sz = (num_visible as usize).max(1);
@@ -202,6 +205,7 @@ impl SplatOps for MainBackendBase {
                 projected_splats.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
+                use_ut,
                 sh_degree,
                 camera.camera_model,
             );
