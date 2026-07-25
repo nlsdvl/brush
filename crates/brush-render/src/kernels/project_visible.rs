@@ -52,7 +52,7 @@ pub fn project_visible_kernel(
         (mx, my, cov.c00, cov.c01, cov.c11)
     } else {
         let cov = calc_cov2d(scale, quat, mean_c, u, camera_model);
-        let (mx, my) = project(mean_c, u.pinhole_params, camera_model);
+        let (mx, my) = project(mean_c, u.pinhole_params, u.half_max_render_fov, camera_model);
         (mx, my, cov.c00, cov.c01, cov.c11)
     };
     let raw_cov = Sym2 {

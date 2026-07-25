@@ -19,6 +19,7 @@ pub struct KannalaBrandt4Params {
 pub fn project_kb4(
     point: Vec3A,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] params: KannalaBrandt4Params,
 ) -> (f32, f32) {
     let x = point.x();
@@ -34,7 +35,17 @@ pub fn project_kb4(
 
     let r = f32::sqrt(x * x + y * y);
 
-    let theta = r.atan2(z);
+    // Bound `theta` before evaluating the distortion polynomial below: it's
+    // only a valid fit inside the camera's calibrated FOV
+    // (`max_theta` == `ProjectUniforms::half_max_render_fov`). Points at the
+    // splat's mean are already gated against this same bound before
+    // `project()` is ever called (see `project_forward.rs`), but the UT
+    // path (`calc_mean_cov2d_ut`) evaluates this function at 6 additional,
+    // un-gated sigma points per splat, which can land far outside the fit's
+    // valid domain — where the polynomial is known to extrapolate
+    // non-monotonically. Clamping here keeps `theta_d` well-behaved instead
+    // of finite-but-numerically-garbage.
+    let theta = f32::min(r.atan2(z), max_theta);
     let theta2 = theta * theta;
     let theta4 = theta2 * theta2;
     let theta6 = theta2 * theta4;
@@ -53,12 +64,16 @@ pub fn project_kb4(
     )
 }
 
-// This Jacobian calculation does not clamp the Jacobian,
-// since the values do not blow up when theta increases
+// This Jacobian calculation does not clamp the Jacobian itself,
+// since the values do not blow up when theta increases — but `theta` is
+// bounded to `max_theta` before it feeds the distortion polynomial (see
+// `project_kb4`), so the theta-derivative chain is correspondingly zeroed
+// out past that bound below.
 #[cube]
 pub fn calculate_project_jacobian_kb4(
     point: Vec3A,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] params: KannalaBrandt4Params,
 ) -> Mat2x3 {
     let PinholeParams { fx, fy, .. } = pinhole_params;
@@ -84,7 +99,8 @@ pub fn calculate_project_jacobian_kb4(
     let inv_rho2_r = inv_rho2 * inv_r;
 
     // --- KB4 angular distortion ---
-    let theta = r.atan2(z);
+    let theta_raw = r.atan2(z);
+    let theta = f32::min(theta_raw, max_theta);
     let theta2 = theta * theta;
     let theta4 = theta2 * theta2;
     let theta6 = theta4 * theta2;
@@ -99,9 +115,14 @@ pub fn calculate_project_jacobian_kb4(
     // --- d theta / d (x, y, z) ---
     //   dtheta/dx =  x z / (rho² r),  dtheta/dy =  y z / (rho² r),
     //   dtheta/dz = -r / rho²
-    let dth_dx = x * z * inv_rho2_r;
-    let dth_dy = y * z * inv_rho2_r;
-    let dth_dz = -r * inv_rho2;
+    // Zeroed past `max_theta`: once `theta` saturates, it's locally
+    // constant w.r.t. (x, y, z), so its contribution to the Jacobian drops
+    // out (same `select`-based saturation idiom as the `near_axis` fallback
+    // below).
+    let theta_saturated = theta_raw > max_theta;
+    let dth_dx = select(theta_saturated, 0.0f32, x * z * inv_rho2_r);
+    let dth_dy = select(theta_saturated, 0.0f32, y * z * inv_rho2_r);
+    let dth_dz = select(theta_saturated, 0.0f32, -r * inv_rho2);
 
     // --- d theta_d / d (x, y, z) (chain rule through theta) ---
     let dd_dx = dd_dthetha * dth_dx;
@@ -173,20 +194,35 @@ pub fn calculate_projection_vjp_kb4(
     let r = r2.sqrt().max(1.0e-8f32);
     let rho2 = r2 + mz * mz;
 
-    let theta = r.atan2(mz);
+    // Bound `theta` the same way `project_kb4`/`calculate_project_jacobian_kb4`
+    // do (see comments there). In practice this branch is only reached via
+    // the affine backward path, always at the already-vetted mean point, so
+    // the clamp is inert here today — kept for consistency in case that
+    // assumption ever changes.
+    let theta_raw = r.atan2(mz);
+    let theta = f32::min(theta_raw, u.half_max_render_fov);
     let th2 = theta * theta;
     let th4 = th2 * th2;
     let th6 = th4 * th2;
     let th8 = th4 * th4;
 
     let theta_d = theta * (1.0f32 + k1 * th2 + k2 * th4 + k3 * th6 + k4 * th8);
+    let theta_saturated = theta_raw > u.half_max_render_fov;
     // P1 = d theta_d / d theta
-    let p1 = 1.0f32 + 3.0f32 * k1 * th2 + 5.0f32 * k2 * th4 + 7.0f32 * k3 * th6 + 9.0f32 * k4 * th8;
+    let p1 = select(
+        theta_saturated,
+        0.0f32,
+        1.0f32 + 3.0f32 * k1 * th2 + 5.0f32 * k2 * th4 + 7.0f32 * k3 * th6 + 9.0f32 * k4 * th8,
+    );
     // P2 = d^2 theta_d / d theta^2
-    let p2 = 6.0f32 * k1 * theta
-        + 20.0f32 * k2 * theta * th2
-        + 42.0f32 * k3 * theta * th4
-        + 72.0f32 * k4 * theta * th6;
+    let p2 = select(
+        theta_saturated,
+        0.0f32,
+        6.0f32 * k1 * theta
+            + 20.0f32 * k2 * theta * th2
+            + 42.0f32 * k3 * theta * th4
+            + 72.0f32 * k4 * theta * th6,
+    );
 
     let inv_r = 1.0f32 / r;
     let inv_r3 = inv_r * inv_r * inv_r;

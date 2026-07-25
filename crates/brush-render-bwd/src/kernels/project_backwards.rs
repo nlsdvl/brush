@@ -251,6 +251,7 @@ pub fn project_backwards_kernel(
             mean_c,
             u.jacobian_clamp_limits,
             u.pinhole_params,
+            u.half_max_render_fov,
             camera_model,
         );
         let v_mean_c =

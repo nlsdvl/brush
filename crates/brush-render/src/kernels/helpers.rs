@@ -152,6 +152,7 @@ pub fn calc_cov2d(
         mean_c,
         u.jacobian_clamp_limits,
         u.pinhole_params,
+        u.half_max_render_fov,
         camera_model,
     );
 
@@ -204,13 +205,13 @@ pub fn calc_mean_cov2d_ut(
     let p5 = mean_c.sub(c1);
     let p6 = mean_c.sub(c2);
 
-    let (u0x, u0y) = project(p0, u.pinhole_params, camera_model);
-    let (u1x, u1y) = project(p1, u.pinhole_params, camera_model);
-    let (u2x, u2y) = project(p2, u.pinhole_params, camera_model);
-    let (u3x, u3y) = project(p3, u.pinhole_params, camera_model);
-    let (u4x, u4y) = project(p4, u.pinhole_params, camera_model);
-    let (u5x, u5y) = project(p5, u.pinhole_params, camera_model);
-    let (u6x, u6y) = project(p6, u.pinhole_params, camera_model);
+    let (u0x, u0y) = project(p0, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u1x, u1y) = project(p1, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u2x, u2y) = project(p2, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u3x, u3y) = project(p3, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u4x, u4y) = project(p4, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u5x, u5y) = project(p5, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u6x, u6y) = project(p6, u.pinhole_params, u.half_max_render_fov, camera_model);
 
     let mean2d_x =
         UT_WEIGHT_MEAN_CENTER * u0x + UT_WEIGHT_OUTER * (u1x + u2x + u3x + u4x + u5x + u6x);

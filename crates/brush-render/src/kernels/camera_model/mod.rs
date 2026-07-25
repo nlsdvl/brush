@@ -49,13 +49,14 @@ pub struct JacobianClampLimits {
 pub fn project(
     point: Vec3A,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] camera_model: CameraModel,
 ) -> (f32, f32) {
     match camera_model {
         Pinhole => project_pinhole(point, pinhole_params),
-        KannalaBrandt4(params) => project_kb4(point, pinhole_params, params),
+        KannalaBrandt4(params) => project_kb4(point, pinhole_params, max_theta, params),
         RadialTangential8(params) => project_rt8(point, pinhole_params, params),
-        ThinPrismFisheye(params) => project_tpf(point, pinhole_params, params),
+        ThinPrismFisheye(params) => project_tpf(point, pinhole_params, max_theta, params),
     }
 }
 
@@ -65,15 +66,18 @@ pub fn calculate_project_jacobian(
     point: Vec3A,
     jacobian_clamp_limits: JacobianClampLimits,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] camera_model: CameraModel,
 ) -> Mat2x3 {
     match camera_model {
         Pinhole => calculate_project_jacobian_pinhole(point, jacobian_clamp_limits, pinhole_params),
-        KannalaBrandt4(params) => calculate_project_jacobian_kb4(point, pinhole_params, params),
+        KannalaBrandt4(params) => calculate_project_jacobian_kb4(point, pinhole_params, max_theta, params),
         RadialTangential8(params) => {
             calculate_project_jacobian_rt8(point, jacobian_clamp_limits, pinhole_params, params)
         }
-        ThinPrismFisheye(params) => calculate_project_jacobian_tpf(point, pinhole_params, params),
+        ThinPrismFisheye(params) => {
+            calculate_project_jacobian_tpf(point, pinhole_params, max_theta, params)
+        }
     }
 }
 

@@ -64,9 +64,10 @@ fn thin_prism_polys(
 pub fn project_tpf(
     point: Vec3A,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] params: ThinPrismFisheyeParams,
 ) -> (f32, f32) {
-    let (u_kb4, v_kb4) = project_kb4(point, pinhole_params, params.kb4);
+    let (u_kb4, v_kb4) = project_kb4(point, pinhole_params, max_theta, params.kb4);
 
     let x = point.x();
     let y = point.y();
@@ -83,9 +84,10 @@ pub fn project_tpf(
 pub fn calculate_project_jacobian_tpf(
     point: Vec3A,
     pinhole_params: PinholeParams,
+    max_theta: f32,
     #[comptime] params: ThinPrismFisheyeParams,
 ) -> Mat2x3 {
-    let kb4_jac = calculate_project_jacobian_kb4(point, pinhole_params, params.kb4);
+    let kb4_jac = calculate_project_jacobian_kb4(point, pinhole_params, max_theta, params.kb4);
 
     let PinholeParams { fx, fy, .. } = pinhole_params;
     let x = point.x();

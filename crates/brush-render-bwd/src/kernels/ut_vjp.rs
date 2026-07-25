@@ -51,13 +51,13 @@ pub fn calculate_ut_vjp(
     let p5 = mean_c.sub(c1);
     let p6 = mean_c.sub(c2);
 
-    let (u0x, u0y) = project(p0, u.pinhole_params, camera_model);
-    let (u1x, u1y) = project(p1, u.pinhole_params, camera_model);
-    let (u2x, u2y) = project(p2, u.pinhole_params, camera_model);
-    let (u3x, u3y) = project(p3, u.pinhole_params, camera_model);
-    let (u4x, u4y) = project(p4, u.pinhole_params, camera_model);
-    let (u5x, u5y) = project(p5, u.pinhole_params, camera_model);
-    let (u6x, u6y) = project(p6, u.pinhole_params, camera_model);
+    let (u0x, u0y) = project(p0, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u1x, u1y) = project(p1, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u2x, u2y) = project(p2, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u3x, u3y) = project(p3, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u4x, u4y) = project(p4, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u5x, u5y) = project(p5, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let (u6x, u6y) = project(p6, u.pinhole_params, u.half_max_render_fov, camera_model);
 
     let mean2d_x =
         UT_WEIGHT_MEAN_CENTER * u0x + UT_WEIGHT_OUTER * (u1x + u2x + u3x + u4x + u5x + u6x);
@@ -141,13 +141,13 @@ pub fn calculate_ut_vjp(
         lim_neg_x: -1.0e9f32,
         lim_neg_y: -1.0e9f32,
     };
-    let j0 = calculate_project_jacobian(p0, wide_clamp, u.pinhole_params, camera_model);
-    let j1 = calculate_project_jacobian(p1, wide_clamp, u.pinhole_params, camera_model);
-    let j2 = calculate_project_jacobian(p2, wide_clamp, u.pinhole_params, camera_model);
-    let j3 = calculate_project_jacobian(p3, wide_clamp, u.pinhole_params, camera_model);
-    let j4 = calculate_project_jacobian(p4, wide_clamp, u.pinhole_params, camera_model);
-    let j5 = calculate_project_jacobian(p5, wide_clamp, u.pinhole_params, camera_model);
-    let j6 = calculate_project_jacobian(p6, wide_clamp, u.pinhole_params, camera_model);
+    let j0 = calculate_project_jacobian(p0, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j1 = calculate_project_jacobian(p1, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j2 = calculate_project_jacobian(p2, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j3 = calculate_project_jacobian(p3, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j4 = calculate_project_jacobian(p4, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j5 = calculate_project_jacobian(p5, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
+    let j6 = calculate_project_jacobian(p6, wide_clamp, u.pinhole_params, u.half_max_render_fov, camera_model);
 
     let vpt0 = j0.transpose_mul_vec2(vp0);
     let vpt1 = j1.transpose_mul_vec2(vp1);
