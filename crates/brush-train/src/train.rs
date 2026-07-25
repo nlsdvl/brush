@@ -616,6 +616,55 @@ impl SplatTrainer {
         let screen_sizes = refiner.max_screen_size.clone();
         splats = self.refine_splats(&device, record, splats, split_inds, screen_sizes, iter);
 
+        // Defense-in-depth: `refine_splats` just concatenated newly
+        // split/cloned rows into `splats` without re-validating them - the
+        // `non_finite_mask` computed above only covers rows that existed
+        // before this call. Catch a bad row here, in the same `refine()`
+        // call, rather than waiting for the next call's `non_finite_mask`
+        // pass (by which point it may already have been rendered/exported).
+        // Broader than `row_non_finite`: an exact all-zero quaternion is
+        // finite but geometrically invalid - mirrors the `qnorm_sq >= 1e-6`
+        // gate `project_forward_kernel` already applies at read time
+        // (crates/brush-render/src/kernels/project_forward.rs:71-75).
+        let post_transforms = splats.transforms.val();
+        let quat_sq_norm = post_transforms
+            .clone()
+            .slice(s![.., 3..7])
+            .powi_scalar(2)
+            .sum_dim(1)
+            .squeeze_dim(1);
+        let quat_degenerate = quat_sq_norm.lower_elem(1.0e-6);
+        let post_bad_mask = row_non_finite(&post_transforms)
+            .bool_or(row_non_finite(&splats.sh_coeffs.val().flatten(1, 2)))
+            .bool_or(row_non_finite(
+                &splats.raw_opacities.val().unsqueeze_dim(1),
+            ))
+            .bool_or(quat_degenerate);
+        let num_pruned_post_refine = post_bad_mask
+            .clone()
+            .int()
+            .sum()
+            .into_scalar_async::<i32>()
+            .await
+            .expect("Failed to count degenerate post-refine splats") as u32;
+
+        if num_pruned_post_refine > 0 {
+            log::warn!(
+                "iter={iter}: pruning {num_pruned_post_refine} degenerate splat(s) \
+                 created during refine_splats (non-finite or zero-norm quaternion)"
+            );
+            let mut record = self
+                .optim
+                .take()
+                .expect("refine_splats always re-creates the optimizer")
+                .to_record();
+            let placeholder = RefineRecord::new(splats.num_splats(), &device.clone().inner());
+            let (pruned_splats, _placeholder, _) =
+                prune_points(splats, &mut record, placeholder, post_bad_mask).await;
+            splats = pruned_splats;
+            self.optim = Some(create_optimizer_from_config().load_record(record));
+        }
+
         // Update current bounds based on the splats.
         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
         client.memory_cleanup();
